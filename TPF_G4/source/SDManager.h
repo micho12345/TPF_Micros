@@ -52,7 +52,11 @@ void PlaySong(char *name, uint8_t volumen);
 
 uint32_t Mp3ReadId3V2Tag(FIL* pInFile, char* pszArtist, uint32_t unArtistSize, char* pszTitle, uint32_t unTitleSize);
 
+void PauseSong(void);
 
+void ResumeSong(void);
+
+void getSongName(uint8_t SongName[1][NAME_SIZE]);
 
 /*******************************************************************************
  ******************************************************************************/

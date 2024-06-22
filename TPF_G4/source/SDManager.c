@@ -31,8 +31,9 @@
 #include "diskio.h"
 #include "ffconf.h"
 #include "fsl_clock.h"
-//#include "PIT.h"
-//#include "DAC.h"
+#include "UI/Pdrivers/headers/PIT.h"
+#include "UI/Pdrivers/headers/DAC.h"
+#include "UI/Pdrivers/headers/DMA.h"
 #include "ff.h"
 
 
@@ -70,7 +71,9 @@ int16_t audio_buff[2304*2];		//buffer partido> un frame decodificando y otro ley
 
 static uint32_t Mp3ReadId3V2Text(FIL* pInFile, uint32_t unDataLen, char* pszBuffer, uint32_t unBufferSize);
 
+static void RunDAC(int sample_rate, int output_samples);
 
+static void ProvideAudioBuffer(int16_t *samples, int cnt, uint8_t volumen);
 
 /*******************************************************************************
  *******************************************************************************
@@ -281,8 +284,8 @@ void PlaySong(char *name, uint8_t volumen) {
 		MP3GetLastFrameInfo(Decoder, &Data_Frame);
 		if(!dac_on) {       //PRENDO EL DAC
 			dac_on = 1;
-			//RunDAC(Data_Frame.samprate, Data_Frame.outputSamps);
-			//DAC_Enable(DAC_0, true);
+			RunDAC(Data_Frame.samprate, Data_Frame.outputSamps);
+			DAC_Enable(DAC_0, true);
 		}
 		//Si tiene un canal (si es mono), duplica los datos para mantener velocidad de reproduccion
 		if (Data_Frame.nChans == 1) {
@@ -297,7 +300,7 @@ void PlaySong(char *name, uint8_t volumen) {
 	//Procesamiento de los samples post decodificacion
     if (!outOfData) {			//TO DO: JUNTARME CON CUTY A HACER EL VUMETRO
 
-		//ProvideAudioBuffer(samples, Data_Frame.outputSamps, volumen);
+		ProvideAudioBuffer(samples, Data_Frame.outputSamps, volumen);
 
 
  		//VUMETRO
@@ -412,6 +415,11 @@ uint32_t Mp3ReadId3V2Tag(FIL* pInFile, char* pszArtist, uint32_t unArtistSize, c
  *
  * Outputs:     -
  **************************************************************************************/
+void PauseSong(void){
+	PIT_stopTime(TIMER_ID);				//Paro el timer pasandole el ID
+	DAC0->DAT[0].DATH = DAC_OFF_H;		//Para darme cuenta que del DAC solo salga esto y ande bien
+	DAC0->DAT[0].DATL = DAC_OFF_L;
+}
 
 /**************************************************************************************
  * Function:    ResumeSong
@@ -422,7 +430,9 @@ uint32_t Mp3ReadId3V2Tag(FIL* pInFile, char* pszArtist, uint32_t unArtistSize, c
  *
  * Outputs:     -
  **************************************************************************************/
-
+void ResumeSong(void) {
+	PIT_startTime(TIMER_ID);		//Le doy play al timer pasandole el ID
+}
 
 /**************************************************************************************
  * Function:    getSongName
@@ -433,7 +443,9 @@ uint32_t Mp3ReadId3V2Tag(FIL* pInFile, char* pszArtist, uint32_t unArtistSize, c
  *
  * Outputs:     -
  **************************************************************************************/
-
+void getSongName(uint8_t SongName[1][NAME_SIZE]){
+	strcpy( (char*) SongName[0], titulo);    		//Guardo los nombres
+}
 
 /*******************************************************************************
  *******************************************************************************
@@ -504,3 +516,85 @@ static uint32_t Mp3ReadId3V2Text(FIL* pInFile, uint32_t unDataLen, char* pszBuff
  *
  * Outputs:     -
  **************************************************************************************/
+static void RunDAC(int sample_rate, int output_samples) {
+
+	initDAC(DAC_0);			//Inicializo el DAC
+
+	// DMA Config
+	DMA_config_t DMAconfig = {.channel = DMA_1, .source_buffer = sample_buffer,
+								 .destination_buffer = &(DAC0->DAT), .source_offset = sizeof(uint32_t), .transfer_size = sizeof(uint16_t),
+								 .source_full_size = output_samples*sizeof(uint32_t), .source_unit_size = sizeof(uint32_t), .request_source = DMAALWAYS63};
+
+	DMA_Config(DMAconfig);
+
+	PIT_init();				//Inicializo el Timer y hago su configuracion
+	PIT_configTimer(TIMER_ID,((CLOCK_GetFreq(kCLOCK_BusClk) / (sample_rate))));		//El clock lo saco de fsl_clock
+	PIT_startTime(TIMER_ID);		//Le doy play al timer pasandole el ID
+}
+
+
+/**************************************************************************************
+ * Function:    ProvideAudioBuffer
+ *
+ * Description: Le provee los samples de audio al audio buffer
+ *
+ * Inputs:      Las samples, el contador y el volumen
+ *
+ * Outputs:     -
+ **************************************************************************************/
+
+static void ProvideAudioBuffer(int16_t *samples, int total_samples, uint8_t volumen) {
+	static uint8_t state = 0;
+
+	//Ecualizador
+	/*
+	if ( GetOnOffEq()) {							//Si el ecualizador esta en ON
+		float32_t input_filter_buffer[SAMPLE_BUFFER_SIZE];	//Uso un buffer para la entrada del filtro
+		float32_t output_filter_buffer[SAMPLE_BUFFER_SIZE];	//Uso otro para la salida del filtro
+		for (int i = 0; i < total_samples; i++) {
+			input_filter_buffer[i] = (float32_t)samples[i];	//Pongo las samples en el buffer
+		}
+		offEqualizer(input_filter_buffer, output_filter_buffer, total_samples);	//Hago el proceso del filtro
+
+		for (int i = 0; i < total_samples; i++) {		//Ahora pongo lo resultante del filtro en las samples
+			samples[i] = (int16_t) output_filter_buffer[i];
+		}
+	}			//Aca ya esta sintetizada
+*/
+	//Ajusto el Volumen: del Indu
+	int32_t promedio = 0;
+	uint8_t volume = volumen * VOLUMEN_FACTOR;							//Como es de 20 niveles, se multiplica por 5
+	for(int i = 0; i < total_samples; i++) {							//para que el nivel 20 sea el 100%
+		if(i%2 == 0) {													//Si es par
+			promedio =   (samples[i] + samples[i+1])/2;					//promedio de ambas samples
+			samples[i] = (int16_t)promedio * (int32_t)volume / 100;		//Modifico volumen de la sample (regla de 3)
+		}
+	}
+
+	//Hago el PING PONG buffer: primer mitad
+	if(state == 0) {
+		while( DMA_GetRemainingMajorLoopCount(DMA_1) > total_samples/2 ) {}
+		//Lleva la cuenta de los bytes que faltan transferir, cuando llega a la mitad, arranca con el otro estado
+
+		for(int i = 0; i < total_samples; i++) {			//INDU
+			audio_buff[i] = *samples / NAME_SIZE;
+			audio_buff[i] += (4096/2);
+			samples++;
+		}
+		state = 1;
+		return;
+	}
+
+	//Hago el PING PONG buffer: segunda mitad
+	if(state == 1) {
+		while( DMA_GetRemainingMajorLoopCount(DMA_1) < total_samples/2 ) { }
+		//Lo mismo que arriba, cuando se pasa de la mitad, cambia al otro estado. Asi se hace el ping pong
+
+		for(int i = 0; i < total_samples; i++) {				//INDU
+			audio_buff[i + total_samples] = *samples / NAME_SIZE;
+			audio_buff[i + total_samples] += (4096/2);
+			samples++;
+		}
+		state = 0;
+	}
+}
